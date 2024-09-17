@@ -1,7 +1,7 @@
 import logging
 import os
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, BotCommand
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -44,6 +44,37 @@ from commands.utils import fetch_events, should_notify, extract_completion_url
 
 # Dictionary to store user timezones (for a single user in this case)
 user_timezone = {}
+
+# Function to handle event completion from callback query
+async def mark_event_completed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    task_uid = query.data
+
+    # Acknowledge the callback query
+    await query.answer()
+
+    # Find the completion URL based on the task UID
+    events = fetch_events()
+    completion_url = None
+    for event in events:
+        if event['uid'] == task_uid:
+            completion_url = extract_completion_url(event['description'])
+            break
+
+    if completion_url:
+        # Make the API call to mark the task as completed
+        try:
+            response = requests.get(completion_url)
+            if response.status_code == 200:
+                await query.edit_message_text(f"The task has been marked as completed.")
+            else:
+                await query.edit_message_text(f"Failed to mark the task as completed. Status code: {response.status_code}")
+        except Exception as e:
+            logging.error(f"Error making API call: {e}")
+            await query.edit_message_text(f"An error occurred while marking the task as completed.")
+    else:
+        await query.edit_message_text("No completion URL found for this task.")
+
 
 async def send_morning_notifications(context: ContextTypes.DEFAULT_TYPE):
     bot = context.bot
