@@ -2,3 +2,4 @@
 /venv
 /commands/__pycache__/utils.cpython-312.pyc
 /commands/__pycache__/cmd_showtoday.cpython-312.pyc
+.DS_Store
