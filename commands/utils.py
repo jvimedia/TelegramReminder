@@ -61,8 +61,11 @@ def should_notify(event_uid):
         return True
     return False
 
+# Improved URL extraction to handle line breaks and extra spaces in the description
 def extract_completion_url(description):
-    match = re.search(r'\[✅ set task status completed\]\((.*?)\)', description)
+    # Match the URL part from the description (accounting for line breaks and spaces)
+    match = re.search(r'\[✅ set task status\s+completed\]\((http[^\s\)]+)\)', description, re.DOTALL)
+    
     if match:
         return match.group(1)
     return None
