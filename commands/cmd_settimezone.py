@@ -1,18 +1,11 @@
 # commands/cmd_settimezone.py
 
 from telegram import Update
-from telegram.ext import (
-    ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    filters,
-)
+from telegram.ext import ContextTypes, ConversationHandler
 import pytz
-import logging
 
 ASK_TIMEZONE = 1
 
-# Rename function to set_timezone_command
 async def set_timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Please send me your timezone in the format 'Region/City', e.g., 'Europe/Berlin'."

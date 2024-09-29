@@ -1,7 +1,15 @@
+# telegram_bot.py
+
 import logging
 import os
+import base64  # Import base64 for encoding/decoding UIDs
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, BotCommand
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+    BotCommand,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -14,7 +22,7 @@ from telegram.ext import (
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, time
 import pytz
-import requests
+import aiohttp  # Use aiohttp for asynchronous HTTP requests
 
 # Load environment variables from .env file
 load_dotenv()
@@ -40,142 +48,131 @@ from commands.cmd_settimezone import (
     cancel,
     ASK_TIMEZONE,
 )
-from commands.utils import fetch_events, should_notify, extract_completion_url
+from commands.utils import (
+    fetch_events,
+    should_notify,
+    extract_completion_url,
+    format_event_message,
+    get_next_event,
+)
 
-# Dictionary to store user timezones (for a single user in this case)
-user_timezone = {}
+# Dictionary to store user data
+user_data = {}
 
-# Function to handle event completion from callback query
-async def mark_event_completed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Function to handle callback queries
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    task_uid = query.data
+    data = query.data.split(':')
+    action = data[0]
+    encoded_event_uid = data[1]
+    event_uid = base64.urlsafe_b64decode(encoded_event_uid.encode()).decode()
 
     # Acknowledge the callback query
     await query.answer()
 
-    # Find the completion URL based on the task UID
-    events = fetch_events()
-    completion_url = None
-    for event in events:
-        if event['uid'] == task_uid:
-            completion_url = extract_completion_url(event['description'])
-            break
+    if action == 'toggle':
+        # Toggle expand/collapse
+        is_expanded = data[2] == 'True'
+        await update_event_message(
+            query, context, event_uid, not is_expanded, is_completed=False
+        )
+    elif action == 'complete':
+        # Mark event as completed
+        await mark_event_completed(query, context, event_uid)
 
+async def update_event_message(query, context, event_uid, is_expanded, is_completed):
+    # Fetch the specific event
+    events = await fetch_events()
+    event = next((e for e in events if e['uid'] == event_uid), None)
+    if not event:
+        await query.edit_message_text("Event not found.")
+        return
+
+    # Update the message with the completed status and inline buttons
+    message, reply_markup = format_event_message(
+        event, is_expanded=is_expanded, is_completed=is_completed
+    )
+
+    # Use `query.edit_message_text` to update the original message in place
+    try:
+        await query.edit_message_text(
+            text=message, reply_markup=reply_markup, parse_mode='Markdown'
+        )
+    except Exception as e:
+        logging.error(f"Failed to edit message: {e}")
+
+
+async def mark_event_completed(query, context, event_uid):
+    # Fetch the specific event
+    events = await fetch_events()
+    event = next((e for e in events if e['uid'] == event_uid), None)
+    if not event:
+        await query.edit_message_text("Event not found.")
+        return
+
+    # Find the completion URL
+    completion_url = extract_completion_url(event['description'])
     if completion_url:
         # Make the API call to mark the task as completed
         try:
-            response = requests.get(completion_url)
-            if response.status_code == 200:
-                await query.edit_message_text(f"The task has been marked as completed.")
-            else:
-                await query.edit_message_text(f"Failed to mark the task as completed. Status code: {response.status_code}")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(completion_url) as response:
+                    if response.status == 200:
+                        # Update the message to show completion using `edit_message_text`
+                        await update_event_message(
+                            query, context, event_uid, is_expanded=True, is_completed=True
+                        )
+                        # No need to send a new message here
+                    else:
+                        await query.edit_message_text(
+                            f"Failed to mark the task as completed. Status code: {response.status}"
+                        )
         except Exception as e:
             logging.error(f"Error making API call: {e}")
-            await query.edit_message_text(f"An error occurred while marking the task as completed.")
+            await query.edit_message_text(
+                "An error occurred while marking the task as completed."
+            )
     else:
         await query.edit_message_text("No completion URL found for this task.")
 
-
-async def send_morning_notifications(context: ContextTypes.DEFAULT_TYPE):
+async def send_event_reminders(context: ContextTypes.DEFAULT_TYPE):
     bot = context.bot
     chat_id = CHAT_ID
-    events = fetch_events()
+    events = await fetch_events()
 
     # Use the user's timezone or default
-    user_tz_name = user_timezone.get(chat_id, DEFAULT_TIMEZONE)
+    user_tz_name = user_data.get(chat_id, {}).get('timezone', DEFAULT_TIMEZONE)
     user_tz = pytz.timezone(user_tz_name)
     now = datetime.now(user_tz)
 
     for event in events:
         event_start = event['dtstart']
-        if isinstance(event_start, datetime):
-            if event_start.tzinfo is None:
-                event_start = user_tz.localize(event_start)
-            else:
-                event_start = event_start.astimezone(user_tz)
+        if event_start.tzinfo is None:
+            event_start = user_tz.localize(event_start)
+        else:
+            event_start = event_start.astimezone(user_tz)
 
-            if event_start.date() == now.date():
-                if should_notify('morning_' + event['uid']):
-                    message = (
-                        f"Good morning! You have an upcoming event:\n\n"
-                        f"*{event['summary']}* at {event_start.strftime('%H:%M')} {user_tz_name}"
-                    )
-                    await bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
-                    logging.info(f"Sent morning notification for event UID: {event['uid']}")
+        notify_time_start = event_start - timedelta(minutes=15)
+        notify_time_end = event_start + timedelta(minutes=15)
 
-async def send_event_completion_prompt(context: ContextTypes.DEFAULT_TYPE):
-    bot = context.bot
-    chat_id = CHAT_ID
-    events = fetch_events()
-
-    # Use the user's timezone or default
-    user_tz_name = user_timezone.get(chat_id, DEFAULT_TIMEZONE)
-    user_tz = pytz.timezone(user_tz_name)
-    now = datetime.now(user_tz)
-
-    for event in events:
-        event_end = event['dtend']
-        if isinstance(event_end, datetime):
-            if event_end.tzinfo is None:
-                event_end = user_tz.localize(event_end)
-            else:
-                event_end = event_end.astimezone(user_tz)
-
-            notify_time_start = event_end - timedelta(minutes=30)
-            notify_time_end = event_end + timedelta(minutes=30)
-
-            if notify_time_start <= now <= notify_time_end:
-                if should_notify('event_' + event['uid']):
-                    message = f"Have you completed the event:\n\n*{event['summary']}*?"
-                    url = extract_completion_url(event['description'])
-                    if url:
-                        button = InlineKeyboardButton("Mark as Completed", url=url)
-                        reply_markup = InlineKeyboardMarkup([[button]])
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text=message,
-                            reply_markup=reply_markup,
-                            parse_mode='Markdown'
-                        )
-                        logging.info(f"Sent completion prompt for event UID: {event['uid']}")
-                    else:
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text=message,
-                            parse_mode='Markdown'
-                        )
-                        logging.warning(f"No URL found in event UID: {event['uid']}")
-
-# Handlers for the /settimezone command
-ASK_TIMEZONE = 1  # Define the state for ConversationHandler
-
-async def set_timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Please send me your timezone in the format 'Region/City', e.g., 'Europe/Berlin'."
-    )
-    return ASK_TIMEZONE
-
-async def receive_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_tz = update.message.text.strip()
-    if user_tz in pytz.all_timezones:
-        user_timezone[update.effective_chat.id] = user_tz
-        await update.message.reply_text(f"Timezone set to {user_tz}.")
-        return ConversationHandler.END
-    else:
-        await update.message.reply_text(
-            "Invalid timezone. Please send a valid timezone in the format 'Region/City', e.g., 'Europe/Berlin'."
-        )
-        return ASK_TIMEZONE
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Timezone setting canceled.")
-    return ConversationHandler.END
+        if notify_time_start <= now <= notify_time_end:
+            if should_notify('reminder_' + event['uid']):
+                message, reply_markup = format_event_message(
+                    event, is_expanded=False, is_completed=False
+                )
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="Your next item:\n\n" + message,
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+                logging.info(f"Sent reminder for event UID: {event['uid']}")
 
 # Set bot commands
 async def set_bot_commands(application):
     commands = [
         BotCommand('start', 'Start the bot'),
-        BotCommand('showtoday', 'Show today\'s events'),
+        BotCommand('showtoday', "Show today's events"),
         BotCommand('settimezone', 'Set your timezone'),
     ]
     await application.bot.set_my_commands(commands)
@@ -196,8 +193,8 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('showtoday', show_today))
 
-    # Add a CallbackQueryHandler to handle "Done?" button clicks
-    application.add_handler(CallbackQueryHandler(mark_event_completed))
+    # Add a CallbackQueryHandler
+    application.add_handler(CallbackQueryHandler(handle_callback_query))
 
     # Conversation handler for /settimezone
     conv_handler = ConversationHandler(
@@ -212,19 +209,12 @@ if __name__ == '__main__':
     # Schedule tasks
     job_queue = application.job_queue
 
-    # Schedule morning notifications at 8 AM UTC
-    job_queue.run_daily(
-        send_morning_notifications,
-        time=time(8, 0, tzinfo=pytz.utc),
-        name='morning_notifications'
-    )
-
-    # Check for event completion prompts every 5 minutes
+    # Schedule reminders every minute
     job_queue.run_repeating(
-        send_event_completion_prompt,
-        interval=300,
+        send_event_reminders,
+        interval=60,
         first=0,
-        name='event_completion_prompts'
+        name='event_reminders'
     )
 
     # Start the bot
