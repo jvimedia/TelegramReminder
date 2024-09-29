@@ -1,5 +1,7 @@
 /.env
 /venv
-/commands/__pycache__/utils.cpython-312.pyc
+/commands/__pycache__
 /commands/__pycache__/cmd_showtoday.cpython-312.pyc
 .DS_Store
+commands/__pycache__/cmd_settimezone.cpython-312.pyc
+commands/__pycache__/cmd_start.cpython-312.pyc
