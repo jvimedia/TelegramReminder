@@ -13,5 +13,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Define environment variable
 ENV NAME TelegramReminder
 
-# Run app.py when the container launches
-CMD ["python", "app.py"]
+# Run telegram_bot.py when the container launches
+CMD ["python", "telegram_bot.py"]
