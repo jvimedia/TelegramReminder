@@ -3,3 +3,4 @@ requests
 icalendar
 python-dotenv
 aiohttp>=3.8.0
+timezonefinder
